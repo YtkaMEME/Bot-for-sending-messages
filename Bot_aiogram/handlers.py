@@ -37,7 +37,6 @@ class MainState(StatesGroup):
     edit_mode_add_user_yes_no = State()
     edit_mode_delete_list = State()
     edit_mode_delete_list_yes_no = State()
-    # Новые состояния для управления администраторами
     admin_management = State()
     admin_username_input = State()
     admin_confirmation = State()
@@ -101,9 +100,7 @@ async def get_status(state, message, first_start=False):
         
         # Если первый старт и пользователь не существует, создаем его
         if status_data is None:
-            # Получаем ID создателя бота из первого администратора или из конфига
-            # Здесь для примера просто устанавливаем статус "user" для новых пользователей,
-            # если не смогли определить, является ли пользователь администратором
+
             db.update_status(message.from_user.id, "user")
             status_data = db.get_status(message.from_user.id)
             
@@ -423,7 +420,7 @@ async def edit_mode(message: Message, state: FSMContext):
                 return
             new_user_in_list = users[1][int(message_from_user) - 1]
             db.edit_note_user_lists(id_admin, new_user_in_list, users[0])
-            await message.answer('Пользователь успешно удален. Список обновлен!')
+            await message.answer('Пользователь успешно удален. Список обновлен!', reply_markup=get_main_keyboard())
         else:
             await message.answer('Вы ввели не число. Пожалуйста, введите порядковый номер пользователя.')
             return
@@ -495,7 +492,7 @@ async def edit_mode(message: Message, state: FSMContext):
                 
             db.insert_new_user(id_user[0], user[0], save_username)
             db.edit_note_user_lists(id_admin, id_user, list_users[0])
-            await message.answer('Пользователь успешно добавлен! Список обновлен.')
+            await message.answer('Пользователь успешно добавлен! Список обновлен.', reply_markup=get_main_keyboard())
         elif message_from_user == 'нет':
             await message.answer(f'Отправьте данные пользователя, которого Вы хотите добавить в список.'
                                                 f'\nПример: Антон Чехов @anton_cheh', reply_markup=ReplyKeyboardRemove())
@@ -530,7 +527,7 @@ async def edit_mode(message: Message, state: FSMContext):
             current_list = data['list_users_send']
             id_admin = message.from_user.id
             db.delete_user_list(id_admin, current_list[0])
-            await message.answer(f'Список пользователей №{current_list[0]} успешно удален!')
+            await message.answer(f'Список пользователей №{current_list[0]} успешно удален!', reply_markup=get_main_keyboard())
         elif message_from_user == 'нет':
             lists = db.get_user_lists(user_id=message.from_user.id)
             lists_str = ''
