@@ -190,9 +190,7 @@ class DataBase:
         """
         return self.execute_query(reorder_query, (user_id,))
 
-    def edit_note_user_lists(self, user_id, new_user_in_list, id_list):
-        """Редактирует список пользователей"""
-        # Получаем текущий список
+    def edit_note_user_lists(self, user_id, new_user_in_list, id_list, delete_user=False):
         query = "SELECT list_name FROM user_lists WHERE user_id = ? AND id = ?"
         current_list = self.execute_query(query, (user_id, id_list), fetch_one=True)
         
@@ -202,9 +200,8 @@ class DataBase:
         current_list = current_list[0]
         users = set(map(int, current_list.split(','))) if current_list else set()
         id_new_user_in_list = new_user_in_list[0]
-        
         # Добавляем/удаляем пользователя
-        if id_new_user_in_list in users:
+        if id_new_user_in_list in users or delete_user:
             users.remove(id_new_user_in_list)
         else:
             users.add(id_new_user_in_list)
