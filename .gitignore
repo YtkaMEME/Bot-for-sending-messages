@@ -1,0 +1,34 @@
+# Файлы конфигурации с токенами
+config.py
+
+# Базы данных
+*.db
+*.sqlite3
+
+# Файлы сессий Telegram
+*.session
+*.session-journal
+
+# Python кеш
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Виртуальное окружение
+.venv/
+venv/
+ENV/
+
+# Настройки IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Логи и временные файлы
+*.log
+.DS_Store
+.coverage
+htmlcov/
+.pytest_cache/
+.coverage.* 
