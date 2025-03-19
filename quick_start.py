@@ -3,9 +3,11 @@ from Bot_user.main_bot import get_users_id
 
 db = DataBase('./main.db')
 
-db.create_user_lists_table()
-db.create_status_table()
-db.create_users_table()
+# Добавляем нового администратора
 db.insert_new_note_status(864146808, "admin")
+
+# Получаем и добавляем пользователей
 get_users_id(["@Yuliamolodtsova03"])
-db.get_table("users")
+
+# Выводим содержимое таблицы пользователей
+print(db.get_table("users"))
