@@ -252,6 +252,16 @@ async def process_back_button_callback(callback_query: CallbackQuery, state: FSM
     await callback_query.answer()
     await go_back(callback_query.message, state)
 
+def create_lists_mapping(lists):
+    """Создает словарь для сопоставления порядковых номеров и ID списков"""
+    return {i: list_item[0] for i, list_item in enumerate(lists, 1)}
+
+async def send_user_list_message(message, lists_str, lists_mapping=None):
+    await message.answer(
+        f'Выберите один из существующих списков, <b>написав его номер</b>.\n\n'
+        f'Существующие списки пользователей:\n'
+        f'{lists_str}', reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True), parse_mode='html')
+
 @router.message(F.text == "Отправь Кураторам")
 async def button_send_to_curators(message: Message, state: FSMContext):
     status = await get_status(state, message)
@@ -266,11 +276,13 @@ async def button_send_to_curators(message: Message, state: FSMContext):
         return
     lists_str = ''
     lists_users_data = []
-    for list_users in lists:
+    lists_mapping = create_lists_mapping(lists)
+    
+    for i, list_users in enumerate(lists, 1):
         list_users_str = list_users[2].split(',')
         users = db.get_users(list_users_str)
         lists_users_data.append(users)
-        lists_str += f'\nСписок #{list_users[0]}:\n'
+        lists_str += f'\nСписок #{i}:\n'
         lists_str += format_user_list(users)
 
     await message.answer(
@@ -278,7 +290,7 @@ async def button_send_to_curators(message: Message, state: FSMContext):
         f'или перейти в режим редактирования и создания списков, нажав на кнопку "Режим редактирования".\n\n'
         f'Существующие списки пользователей:\n'
         f'{lists_str}', reply_markup=get_keyboard(answer_yes="Режим редактирования", answer_no="", add_back=True), parse_mode='html')
-    await state.update_data(data_users_lists=lists_users_data)
+    await state.update_data(data_users_lists=lists_users_data, lists_mapping=lists_mapping)
     await state.set_state(MainState.empty_yes_no)
 
 @router.message(F.text == "Режим редактирования")
@@ -337,12 +349,6 @@ def format_lists_of_users(lists):
         lists_str += format_user_list(list_users)
     return lists_str
 
-async def send_user_list_message(message, lists_str):
-    await message.answer(
-        f'Выберите один из существующих списков, <b>написав его номер</b>.\n\n'
-        f'Существующие списки пользователей:\n'
-        f'{lists_str}', reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True), parse_mode='html')
-
 async def handle_no_lists(message, state):
     await message.answer(f'У вас нет созданных списков для рассылок.\n')
     await message.answer(MESSAGES['ENTER_LIST_FORMAT'], reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
@@ -357,7 +363,6 @@ async def start_sending(message: Message, state: FSMContext):
         return
 
     current_state = await state.get_state()
-
     db = DataBase(db_name)
 
     if message.text == "/ОтправьКураторам":
@@ -367,11 +372,13 @@ async def start_sending(message: Message, state: FSMContext):
             return
         lists_str = ''
         lists_users_data = []
-        for list_users in lists:
+        lists_mapping = create_lists_mapping(lists)
+        
+        for i, list_users in enumerate(lists, 1):
             list_users_str = list_users[2].split(',')
             users = db.get_users(list_users_str)
             lists_users_data.append(users)
-            lists_str += f'\nСписок #{list_users[0]}:\n'
+            lists_str += f'\nСписок #{i}:\n'
             lists_str += format_user_list(users)
 
         await message.answer(
@@ -379,7 +386,7 @@ async def start_sending(message: Message, state: FSMContext):
             f'или можете перейти в режим редактирования и создания списков, нажав на кнопку "Режим редактирования"\n\n'
             f'Существующие списки пользователей:\n'
             f'{lists_str}', reply_markup=get_keyboard(answer_yes="Режим редактирования", answer_no="", add_back=True))
-        await state.update_data(data_users_lists=lists_users_data)
+        await state.update_data(data_users_lists=lists_users_data, lists_mapping=lists_mapping)
         await state.set_state(MainState.empty_yes_no)
         return
     elif current_state == MainState.empty_yes_no:
@@ -387,15 +394,17 @@ async def start_sending(message: Message, state: FSMContext):
         if message_from_user.isdigit():
             data = await state.get_data()
             lists = data['data_users_lists']
-            if int(message_from_user) > len(lists) or int(message_from_user) < 1:
+            lists_mapping = data['lists_mapping']
+            selected_number = int(message_from_user)
+            
+            if selected_number > len(lists) or selected_number < 1:
                 await message.answer(MESSAGES['INVALID_NUMBER'], 
                                     reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
                 return
-            # Получаем все списки из базы данных
-            db_lists = db.get_user_lists(user_id=message.from_user.id)
-            # Находим ID списка по порядковому номеру
-            selected_list_id = db_lists[int(message_from_user) - 1][0]
-            await state.update_data(list_users_send=[selected_list_id, lists[int(message_from_user) - 1]])
+                
+            # Получаем ID списка из словаря сопоставления
+            selected_list_id = lists_mapping[selected_number]
+            await state.update_data(list_users_send=[selected_list_id, lists[selected_number - 1]])
             await message.answer(f"Отправьте мне текст сообщения для рассылки пожалуйста", 
                                reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
             await state.set_state(MainState.message)
@@ -438,14 +447,16 @@ async def edit_mode_menu(callback_query: CallbackQuery, state: FSMContext, messa
                 return
             lists_str = ''
             lists_users_data = []
-            for list_users in lists:
+            lists_mapping = create_lists_mapping(lists)
+            
+            for i, list_users in enumerate(lists, 1):
                 list_users_str = list_users[2].split(',')
                 users = db.get_users(list_users_str)
                 lists_users_data.append(users)
-                lists_str += f'\nСписок #{list_users[0]}:\n'
+                lists_str += f'\nСписок #{i}:\n'
                 lists_str += format_user_list(users)
             await send_user_list_message(callback_query.message, lists_str)
-            await state.update_data(data_users_lists=lists_users_data)
+            await state.update_data(data_users_lists=lists_users_data, lists_mapping=lists_mapping)
             await state.set_state(MainState.edit_mode_user_digit)
             return
         elif message_from_user == 'удалить список полностью':
@@ -455,14 +466,16 @@ async def edit_mode_menu(callback_query: CallbackQuery, state: FSMContext, messa
                 return
             lists_str = ''
             lists_users_data = []
-            for list_users in lists:
+            lists_mapping = create_lists_mapping(lists)
+            
+            for i, list_users in enumerate(lists, 1):
                 list_users_str = list_users[2].split(',')
                 users = db.get_users(list_users_str)
                 lists_users_data.append(users)
-                lists_str += f'\nСписок #{list_users[0]}:\n'
+                lists_str += f'\nСписок #{i}:\n'
                 lists_str += format_user_list(users)
             await send_user_list_message(callback_query.message, lists_str)
-            await state.update_data(data_users_lists=lists_users_data)
+            await state.update_data(data_users_lists=lists_users_data, lists_mapping=lists_mapping)
             await state.set_state(MainState.edit_mode_delete_list)
             return
     elif current_state == MainState.edit_mode_user_yes_no:
@@ -525,15 +538,17 @@ async def edit_mode(message: Message, state: FSMContext):
         if message_from_user.isdigit():
             data = await state.get_data()
             lists = data['data_users_lists']
-            if int(message_from_user) > len(lists) or int(message_from_user) < 1:
+            lists_mapping = data['lists_mapping']
+            selected_number = int(message_from_user)
+            
+            if selected_number > len(lists) or selected_number < 1:
                 await message.answer(MESSAGES['INVALID_NUMBER'], 
                     reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
                 return
-            # Получаем все списки из базы данных
-            db_lists = db.get_user_lists(user_id=message.from_user.id)
-            # Находим ID списка по порядковому номеру
-            selected_list_id = db_lists[int(message_from_user) - 1][0]
-            await state.update_data(list_users_send=[selected_list_id, lists[int(message_from_user) - 1]])
+                
+            # Получаем ID списка из словаря сопоставления
+            selected_list_id = lists_mapping[selected_number]
+            await state.update_data(list_users_send=[selected_list_id, lists[selected_number - 1]])
             await message.answer(f"Что Вы хотите сделать с данным списком?\n"
                                  f"- Удалить пользователя\n"
                                  f"- Добавить нового пользователя",
@@ -545,85 +560,22 @@ async def edit_mode(message: Message, state: FSMContext):
             await message.answer(MESSAGES['INVALID_FORMAT'], 
                               reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
             return
-    elif current_state == MainState.edit_mode_number_of_user_delete:
-        id_admin = message.from_user.id
-        message_from_user = message.text.lower()
-        if message_from_user.isdigit():
-            data = await state.get_data()
-            users = data['list_users_send']
-            if int(message_from_user) > len(users[1]) or int(message_from_user) < 1:
-                await message.answer(MESSAGES['INVALID_NUMBER'], 
-                    reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
-                return
-                
-            user_to_delete = users[1][int(message_from_user) - 1]
-            db.edit_note_user_lists(id_admin, user_to_delete, users[0], delete_user=True)
-            
-            lists = db.get_user_lists(user_id=id_admin)
-            updated_list = None
-            for list_item in lists:
-                if list_item[0] == users[0]:
-                    list_users_str = list_item[2].split(',')
-                    updated_list = db.get_users(list_users_str)
-                    break
-                    
-            if updated_list:
-                lists_str = format_user_list(updated_list)
-                await message.answer(f'Пользователь успешно удален! Обновленный список №{users[0]}:\n\n{lists_str}')
-            else:
-                await message.answer('Пользователь успешно удален! Список обновлен.')
-                
-            await message.answer('Хотите продолжить редактирование этого списка?', reply_markup=get_keyboard())
-            
-            if updated_list:
-                await state.update_data(list_users_send=[users[0], updated_list])
-                
-            await state.set_state(MainState.edit_mode_continue)
-            return
-        else:
-            await message.answer('Вы ввели не число. Пожалуйста, <b>введите порядковый номер пользователя</b>.', 
-                              reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True),
-                              parse_mode='html')
-            return
-    elif current_state == MainState.edit_mode_add_user:
-        message_from_user = message.text
-        try:
-            parts = message_from_user.split('@')
-            if len(parts) < 2 or len(parts[0]) < 2:
-                raise ValueError(MESSAGES['INVALID_FORMAT'])
-            user_name = parts[0].strip()
-            user_teg = parts[1].strip()
-            
-            # Добавляем @ к тегу пользователя
-            if not user_teg.startswith('@'):
-                user_teg = '@' + user_teg
-            else:
-                # Если @ уже был в исходной строке, он попал в parts[1]
-                user_teg = '@' + user_teg
-                
-            user_str = f'{user_name} {user_teg}\n'
-        except Exception as e:
-            await message.reply(MESSAGES['INVALID_FORMAT'], 
-                             reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
-            return
-        await message.answer(f'{user_str}\nВы хотите добавить данного пользователя?', reply_markup=get_keyboard())
-        await state.update_data(new_useer=[user_name, user_teg])
-        await state.set_state(MainState.edit_mode_add_user_yes_no)
-        return
     elif current_state == MainState.edit_mode_delete_list:
         message_from_user = message.text.lower()
         if message_from_user.isdigit():
             data = await state.get_data()
             lists = data['data_users_lists']
-            if int(message_from_user) > len(lists) or int(message_from_user) < 1:
+            lists_mapping = data['lists_mapping']
+            selected_number = int(message_from_user)
+            
+            if selected_number > len(lists) or selected_number < 1:
                 await message.answer(MESSAGES['INVALID_NUMBER'], 
                     reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
                 return
-            # Получаем все списки из базы данных
-            db_lists = db.get_user_lists(user_id=message.from_user.id)
-            # Находим ID списка по порядковому номеру
-            selected_list_id = db_lists[int(message_from_user) - 1][0]
-            users = [selected_list_id, lists[int(message_from_user) - 1]]
+                
+            # Получаем ID списка из словаря сопоставления
+            selected_list_id = lists_mapping[selected_number]
+            users = [selected_list_id, lists[selected_number - 1]]
             await state.update_data(list_users_send=users)
             lists_str = format_user_list(users[1])
             await message.answer(f'Вы уверены, что хотите удалить данный список пользователей?\n\n'
@@ -801,13 +753,37 @@ async def message_for_send(message: Message, state: FSMContext):
         list_users = user_data['list_users_send']
         list_users_str = format_user_list(list_users)
 
-        await message.answer(f"Вы хотите отправить следующее сообщение:\n\n"
-                             f"{message_from_user}\n\n"
-                           f"Следующим пользователям:\n\n"
-                           f"{list_users_str}\n"
-                           f"Всё верно?", reply_markup=get_keyboard())
+        # Отправляем сообщение с сохранением форматирования
+        await message.answer(
+            "Вы хотите отправить следующее сообщение:\n\n",
+            parse_mode=None
+        )
+        
+        # Отправляем само сообщение с форматированием
+        if message.entities:
+            await message.answer(
+                message_from_user,
+                entities=message.entities,
+                parse_mode=None
+            )
+        else:
+            await message.answer(
+                message_from_user,
+                parse_mode='HTML'
+            )
+            
+        # Отправляем список получателей
+        await message.answer(
+            f"\nСледующим пользователям:\n\n"
+            f"{list_users_str}\n"
+            f"Всё верно?",
+            reply_markup=get_keyboard()
+        )
 
-        await state.update_data(message_send=message_from_user)
+        await state.update_data(
+            message_send=message_from_user,
+            original_message=message  # Сохраняем оригинальное сообщение с форматированием
+        )
         await state.set_state(MainState.message_yes_no)
         return
 
@@ -827,19 +803,34 @@ async def message_yes_no_handler(message: Message, state: FSMContext):
         user_data = await state.get_data()
         list_users = user_data['list_users_send']
         message_to_send = user_data['message_send']
+        original_message = user_data.get('original_message')
 
         # Получаем список пользователей из второго элемента кортежа
         users = list_users[1]
         for user in users:
             chat_id = user[0]  # Теперь user - это кортеж с данными пользователя
             try:
-                await bot.send_message(chat_id=chat_id, text=message_to_send)
+                if original_message and original_message.entities:
+                    # Если есть оригинальное сообщение с форматированием, используем его
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=message_to_send,
+                        entities=original_message.entities,
+                        parse_mode=None
+                    )
+                else:
+                    # Если форматирования нет, отправляем обычный текст
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=message_to_send,
+                        parse_mode='HTML'
+                    )
             except Exception as e:
-                error_message = f"Произошла ошибка при отправке сообщения: {e}"
-                try:
-                    await message.answer(error_message)
-                except Exception:
-                    print(f"Ошибка при отправке сообщения об ошибке пользователю {chat_id}: {e}")
+                    error_message = f"Произошла ошибка при отправке сообщения: {e}"
+                    try:
+                        await message.answer(error_message)
+                    except Exception:
+                        print(f"Ошибка при отправке сообщения об ошибке пользователю {chat_id}: {e}")
 
         await message.answer(MESSAGES['OPERATION_COMPLETED'], reply_markup=get_main_keyboard())
         await cmd_cancel(message, state, True)
