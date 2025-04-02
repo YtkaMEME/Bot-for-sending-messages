@@ -955,7 +955,7 @@ async def process_admin_action(message: Message, state: FSMContext):
         await go_back(message, state)
         return
     
-    if action not in ["добавить администратора", "удалить администратора"]:
+    if action not in ["добавить администратора", "удалить администратора", "список администраторов"]:
         await message.answer("Пожалуйста, <b>выберите один из предложенных вариантов</b>.", 
                             reply_markup=get_keyboard(answer_yes="Добавить администратора", 
                             answer_no="Удалить администратора", add_back=True), parse_mode='html')
