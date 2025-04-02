@@ -932,13 +932,18 @@ async def cmd_add_admin(message: Message, state: FSMContext):
     if status != "admin":
         await message.answer("У Вас нет прав для управления администраторами.")
         return
-    
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Добавить администратора")],
+            [KeyboardButton(text="Удалить администратора")],
+            [KeyboardButton(text="Список администраторов")],
+            [KeyboardButton(text="Назад")]
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие",
+    )
     await message.answer("Выберите действие:", 
-                        reply_markup=get_keyboard(
-                            answer_yes="Добавить администратора", 
-                            answer_no="Удалить администратора",
-                            answer_3 = "Список администраторов",
-                            add_back=True))
+                        reply_markup=keyboard)
     await state.set_state(MainState.admin_management)
 
 @router.message(MainState.admin_management)
