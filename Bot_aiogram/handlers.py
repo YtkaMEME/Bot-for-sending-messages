@@ -35,6 +35,7 @@ router = Router()
 db_name = DB_PATH
 bot = help_file.bot
 class MainState(StatesGroup):
+    delete_user_username = State()
     status = State()
     empty = State()
     message = State()
@@ -140,6 +141,7 @@ def get_main_keyboard():
             [KeyboardButton(text="Отправь Кураторам")],
             [KeyboardButton(text="Режим редактирования")],
             [KeyboardButton(text="Управление администраторами")],
+            [KeyboardButton(text="Получить список пользователей")],
             [KeyboardButton(text="Отменить все действия")]
         ],
         resize_keyboard=True,
@@ -201,17 +203,20 @@ async def go_back(message: Message, state: FSMContext):
     else:
         await message.answer("Возвращаемся на предыдущий шаг", reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
 
-async def get_status(state, message, first_start=False):
+async def get_status(state, message, first_start=False, user_id=None):
+    if not user_id:
+        user_id = message.from_user.id
+
     user_data = await state.get_data()
     if "status" not in user_data or first_start:
         db = DataBase(db_name)
-        status_data = db.get_status(message.from_user.id)
+        status_data = db.get_status(user_id)
         
         # Если первый старт и пользователь не существует, создаем его
         if status_data is None:
 
-            db.update_status(message.from_user.id, "user")
-            status_data = db.get_status(message.from_user.id)
+            db.update_status(user_id, "user")
+            status_data = db.get_status(user_id)
             
         (status_data, ) = status_data
         await state.update_data(status=status_data)
@@ -261,6 +266,24 @@ async def send_user_list_message(message, lists_str, lists_mapping=None):
         f'Выберите один из существующих списков, <b>написав его номер</b>.\n\n'
         f'Существующие списки пользователей:\n'
         f'{lists_str}', reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True), parse_mode='html')
+
+@router.message(F.text == "Получить список пользователей")
+async def button_get_user_list(message: Message, state: FSMContext):
+    status = await get_status(state, message)
+    if status != "admin":
+        await message.answer(MESSAGES['NO_RIGHTS'])
+        return
+
+    db = DataBase(db_name)
+    users_list = db.get_active_users()
+    if not users_list.empty:
+        output = "Список пользователей:\n\n"
+        for i, user in enumerate(users_list.to_dict('records'), 1):
+            output += f"{i}. {user['username']} {user['full_name']}\n"
+        await message.answer(output, parse_mode='HTML')
+    else:
+        await message.answer("Список пользователей пуст.")
+    return
 
 @router.message(F.text == "Отправь Кураторам")
 async def button_send_to_curators(message: Message, state: FSMContext):
@@ -615,6 +638,60 @@ async def edit_mode(message: Message, state: FSMContext):
             await message.answer(MESSAGES['YES_NO_REQUEST'], 
                               reply_markup=get_keyboard(add_back=True))
             return
+    elif current_state == MainState.edit_mode_add_user:
+        await message.answer(f"Вы хотите добавить в список данного пользователя?\n"
+                             f"{message.text}\n"
+                             f"Для подтверждения нажмите на кнопку 'Да', для отмены - на кнопку 'Нет'", reply_markup=get_keyboard(answer_yes="Да", answer_no="Нет"))
+        await state.set_state(MainState.edit_mode_add_user_yes_no)
+        await state.update_data(new_useer=message.text.split('@'))
+        return
+    elif current_state == MainState.edit_mode_number_of_user_delete:
+        message_from_user = message.text.lower()
+        id_admin = message.from_user.id
+        db = DataBase(db_name)
+        if message_from_user.isdigit():
+            data = await state.get_data()
+            users = data['list_users_send'][1]
+            id_list = data['list_users_send'][0]
+            selected_number = int(message_from_user)
+            
+            if selected_number > len(users) or selected_number < 1:
+                await message.answer(MESSAGES['INVALID_NUMBER'], 
+                    reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
+                return
+                
+            user = users[selected_number - 1]
+            # Добавляем пользователя в список
+            db.edit_note_user_lists(id_admin, user, id_list, delete_user=True)
+            
+            # Получаем обновленный список пользователей
+            lists = db.get_user_lists(user_id=id_admin)
+            updated_list = None
+            for list_item in lists:
+                if list_item[0] == id_list:
+                    list_users_str = list_item[2].split(',')
+                    updated_list = db.get_users(list_users_str)
+                    break
+                    
+            # Выводим обновленный список
+            if updated_list:
+                lists_str = format_user_list(updated_list)
+                await message.answer(f'Пользователь успешно удален! Обновленный список №{id_list}:\n\n{lists_str}')
+                
+            # Спрашиваем о продолжении редактирования
+            await message.answer('Хотите продолжить редактирование этого списка?', reply_markup=get_keyboard())
+            
+            # Сохраняем обновленный список в состоянии
+            if updated_list:
+                await state.update_data(list_users_send=[id_list, updated_list])
+                
+            # Устанавливаем состояние для продолжения редактирования
+            await state.set_state(MainState.edit_mode_continue)
+            return
+        else:
+            await message.answer(MESSAGES['INVALID_FORMAT'], 
+                              reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
+            return
 
 @router.message(MainState.create_list_users)
 @router.message(MainState.create_list_users_yes_no)
@@ -808,7 +885,9 @@ async def message_yes_no_handler(message: Message, state: FSMContext):
         # Получаем список пользователей из второго элемента кортежа
         users = list_users[1]
         for user in users:
-            chat_id = user[0]  # Теперь user - это кортеж с данными пользователя
+            chat_id = user[0]
+            user_name = user[1]
+            status = await get_status(state, message, user_id=chat_id, first_start=True)
             try:
                 if original_message and original_message.entities:
                     # Если есть оригинальное сообщение с форматированием, используем его
@@ -828,9 +907,9 @@ async def message_yes_no_handler(message: Message, state: FSMContext):
             except Exception as e:
                     error_message = f"Произошла ошибка при отправке сообщения: {e}"
                     try:
-                        await message.answer(error_message)
+                        await message.answer(f"Ошибка при отправке сообщения об ошибке пользователю {user_name}: {e}")
                     except Exception:
-                        print(f"Ошибка при отправке сообщения об ошибке пользователю {chat_id}: {e}")
+                        print(f"Ошибка при отправке сообщения об ошибке пользователю {user_name}: {e}")
 
         await message.answer(MESSAGES['OPERATION_COMPLETED'], reply_markup=get_main_keyboard())
         await cmd_cancel(message, state, True)
@@ -858,6 +937,7 @@ async def cmd_add_admin(message: Message, state: FSMContext):
                         reply_markup=get_keyboard(
                             answer_yes="Добавить администратора", 
                             answer_no="Удалить администратора",
+                            answer_3 = "Список администраторов",
                             add_back=True))
     await state.set_state(MainState.admin_management)
 
@@ -881,6 +961,16 @@ async def process_admin_action(message: Message, state: FSMContext):
     if action == "добавить администратора":
         await message.answer("Введите @username пользователя, которого нужно сделать администратором:", 
                            reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
+    elif action == "список администраторов":
+        db = DataBase(db_name)
+        admins = db.get_active_users(status_info="admin")
+        if not admins.empty:
+            output = "Список администраторов:\n\n"
+            for i, admin in enumerate(admins.to_dict('records'), 1):
+                output += f"{i}. {admin['username']} {admin['full_name']}\n"
+            await message.answer(output, parse_mode='HTML')
+        else:
+            await message.answer("Список администраторов пуст.")
     else:
         await message.answer("Введите @username пользователя, у которого нужно удалить права администратора:", 
                            reply_markup=get_keyboard(answer_yes="", answer_no="", add_back=True))
@@ -1110,3 +1200,20 @@ async def continue_editing_handler(message: Message, state: FSMContext):
     else:
         await message.answer(MESSAGES['YES_NO_REQUEST'], reply_markup=get_keyboard())
         return
+
+@router.message(Command("delete_user"))
+async def cmd_delete_user(message: Message, state: FSMContext):
+    if message.from_user.id != 864146808:
+        await message.answer("Иж что захотел, пока не дорос!")
+        return
+    await message.answer("Введите @username пользователя, которого нужно удалить:")
+    await state.set_state(MainState.delete_user_username)
+
+@router.message(MainState.delete_user_username)
+async def process_delete_user_username(message: Message, state: FSMContext):
+    username = message.text
+    db = DataBase(db_name)
+    db.delete_user(username)
+    await message.answer(f"Пользователь {username} удален.")
+    await state.clear()
+    return

@@ -109,7 +109,19 @@ class DataBase:
         df = df.fillna(" ")
         
         return df if num == 0 else df.head(num)
-
+    
+    def get_active_users(self, status_info=None):
+        if status_info:
+            sql_query = f"SELECT * FROM users WHERE users.user_id IN (SELECT user_id FROM status_table WHERE status_info = ?)"
+            data = self.execute_query(sql_query, (status_info,), fetch_all=True)
+        else:
+            sql_query = f"SELECT * FROM users WHERE users.user_id IN (SELECT user_id FROM status_table)"
+            data = self.execute_query(sql_query, fetch_all=True)
+        column_names = [description[0] for description in self.cursor.description]
+        df = pd.DataFrame(data, columns=column_names)
+        df = df.fillna(" ")
+        return df
+    
     def get_unique_elements(self, table_name, column_name):
         """Возвращает уникальные значения столбца таблицы"""
         if not self.check_table(table_name):
@@ -247,7 +259,33 @@ class DataBase:
             
         return self.execute_query(query, data, fetch_all=True) or []
 
-    def delete_user(self, user_id):
-        """Удаляет пользователя"""
-        query = "DELETE FROM users WHERE user_id = ?"
-        return self.execute_query(query, (user_id,))
+    def delete_user(self, username):    
+        """Удаляет пользователя и его ID из всех списков"""
+        # Получаем user_id по username
+        query = "SELECT user_id FROM users WHERE full_name = ?"
+        result = self.execute_query(query, (username,), fetch_all=True)
+
+        if not result:
+            return False
+        user_id = result[0][0]
+        
+        # Получаем все списки пользователей
+        query = "SELECT id, list_name FROM user_lists"
+        lists = self.execute_query(query, fetch_all=True)
+        # Обновляем каждый список, удаляя user_id
+        for list_id, list_name in lists:
+            if list_name:
+                # Разбиваем список на отдельные ID
+                user_ids = list_name.split(',')
+                # Удаляем user_id из списка
+                if str(user_id) in user_ids:
+                    user_ids.remove(str(user_id))
+                    # Собираем список обратно
+                    new_users_list = ','.join(user_ids)
+                    # Обновляем список в базе данных
+                    update_query = "UPDATE user_lists SET list_name = ? WHERE id = ?"
+                    self.execute_query(update_query, (new_users_list, list_id))
+        
+        # Удаляем пользователя из таблицы users
+        query = "DELETE FROM users WHERE full_name = ?"
+        return self.execute_query(query, (username,), fetch_one=True)
