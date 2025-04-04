@@ -19,7 +19,7 @@ class DataBase:
             'status_table': """
                 CREATE TABLE IF NOT EXISTS status_table (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT UNIQUE NOT NULL,
+                    user_id INTEGER UNIQUE NOT NULL,
                     status_info TEXT NOT NULL
                 )
             """,
@@ -28,7 +28,8 @@ class DataBase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
                     list_name TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
                 )
             """,
             'users': """
@@ -75,6 +76,9 @@ class DataBase:
             Результат запроса в зависимости от параметров
         """
         try:
+            # Начинаем транзакцию
+            self.connection.execute("BEGIN TRANSACTION")
+            
             if params:
                 self.cursor.execute(query, params)
             else:
@@ -82,15 +86,29 @@ class DataBase:
 
             if query.strip().lower().startswith("select"):
                 if fetch_one:
-                    return self.cursor.fetchone()
+                    result = self.cursor.fetchone()
                 elif fetch_all:
-                    return self.cursor.fetchall()
-                return True
+                    result = self.cursor.fetchall()
+                else:
+                    result = True
+            else:
+                result = True
 
+            # Фиксируем транзакцию
             self.connection.commit()
-            return True
+            return result
+            
         except sqlite3.Error as e:
+            # Откатываем транзакцию в случае ошибки
+            self.connection.rollback()
             print(f"Ошибка выполнения запроса: {e}")
+            print(f"Запрос: {query}")
+            print(f"Параметры: {params}")
+            return False
+        except Exception as e:
+            # Откатываем транзакцию в случае любой другой ошибки
+            self.connection.rollback()
+            print(f"Неожиданная ошибка: {e}")
             return False
 
     def get_table(self, table_name, num=0):
@@ -177,115 +195,259 @@ class DataBase:
     # Методы для работы со списками пользователей
     def get_user_lists(self, user_id):
         """Получает все списки пользователя"""
-        query = "SELECT * FROM user_lists WHERE user_id = ?"
-        return self.execute_query(query, (user_id,), fetch_all=True) or []
+        try:
+            # Проверяем существование пользователя
+            check_query = "SELECT COUNT(*) FROM users WHERE user_id = ?"
+            if not self.execute_query(check_query, (user_id,), fetch_one=True)[0]:
+                return []
+
+            query = """
+                SELECT ul.id, ul.user_id, ul.list_name, GROUP_CONCAT(u.user_id) as user_ids
+                FROM user_lists ul
+                LEFT JOIN users u ON u.user_id IN (
+                    SELECT CAST(value AS INTEGER) 
+                    FROM json_each('[' || REPLACE(ul.list_name, ',', ',') || ']')
+                )
+                WHERE ul.user_id = ?
+                GROUP BY ul.id
+            """
+            return self.execute_query(query, (user_id,), fetch_all=True) or []
+        except Exception as e:
+            print(f"Ошибка при получении списков пользователя: {e}")
+            return []
 
     def insert_new_note_user_lists(self, user_id, list_name):
         """Добавляет новый список пользователей"""
-        query = "INSERT INTO user_lists (user_id, list_name) VALUES (?, ?)"
-        if self.execute_query(query, (user_id, list_name)):
-            # Переупорядочить ID
-            self._reorder_user_lists(user_id)
-            return True
-        return False
+        try:
+            # Проверяем существование пользователя
+            check_query = "SELECT COUNT(*) FROM users WHERE user_id = ?"
+            if not self.execute_query(check_query, (user_id,), fetch_one=True)[0]:
+                return False
 
-    def _reorder_user_lists(self, user_id):
-        """Переупорядочивает ID в списках пользователей"""
-        reorder_query = """
-            UPDATE user_lists
-            SET id = (
-                SELECT COUNT(*)
-                FROM user_lists AS ul
-                WHERE ul.id <= user_lists.id
-            )
-            WHERE user_id = ?;
-        """
-        return self.execute_query(reorder_query, (user_id,))
+            # Проверяем, что все ID в списке существуют в таблице users
+            try:
+                user_ids = list(map(int, list_name.split(',')))
+            except ValueError:
+                print("Некорректный формат списка ID пользователей")
+                return False
+
+            if user_ids:
+                placeholders = ','.join('?' for _ in user_ids)
+                check_query = f"SELECT COUNT(*) FROM users WHERE user_id IN ({placeholders})"
+                count = self.execute_query(check_query, user_ids, fetch_one=True)
+                if count[0] != len(user_ids):
+                    print("Не все пользователи из списка существуют в базе")
+                    return False
+
+            # Вставляем новый список
+            query = "INSERT INTO user_lists (user_id, list_name) VALUES (?, ?)"
+            return self.execute_query(query, (user_id, list_name))
+        except Exception as e:
+            print(f"Ошибка при добавлении списка пользователей: {e}")
+            return False
 
     def edit_note_user_lists(self, user_id, new_user_in_list, id_list, delete_user=False):
-        query = "SELECT list_name FROM user_lists WHERE user_id = ? AND id = ?"
-        current_list = self.execute_query(query, (user_id, id_list), fetch_one=True)
-        
-        if not current_list:
-            return None
+        """Редактирует список пользователей"""
+        try:
+            # Проверяем существование списка
+            query = "SELECT list_name FROM user_lists WHERE user_id = ? AND id = ?"
+            current_list = self.execute_query(query, (user_id, id_list), fetch_one=True)
             
-        current_list = current_list[0]
-        users = set(map(int, current_list.split(','))) if current_list else set()
-        id_new_user_in_list = new_user_in_list[0]
-        # Добавляем/удаляем пользователя
-        if id_new_user_in_list in users or delete_user:
-            users.remove(id_new_user_in_list)
-        else:
-            users.add(id_new_user_in_list)
+            if not current_list:
+                return False
+                
+            current_list = current_list[0]
+            try:
+                users = set(map(int, current_list.split(','))) if current_list else set()
+            except ValueError:
+                print("Некорректный формат списка пользователей")
+                return False
+
+            id_new_user_in_list = new_user_in_list[0]
+
+            # Проверяем существование пользователя в базе
+            if not delete_user:
+                check_query = "SELECT COUNT(*) FROM users WHERE user_id = ?"
+                if not self.execute_query(check_query, (id_new_user_in_list,), fetch_one=True)[0]:
+                    print("Пользователь не существует в базе")
+                    return False
+
+            # Добавляем/удаляем пользователя
+            if id_new_user_in_list in users or delete_user:
+                users.remove(id_new_user_in_list)
+            else:
+                users.add(id_new_user_in_list)
+                
+            updated_list = ','.join(map(str, users))
             
-        updated_list = ','.join(map(str, users))
-        
-        # Обновляем список
-        query = "UPDATE user_lists SET list_name = ? WHERE user_id = ? AND id = ?"
-        self.execute_query(query, (updated_list, user_id, id_list))
-        
-        # Если список пустой, удаляем его
-        if not updated_list:
-            self.delete_user_list(user_id, id_list)
+            # Обновляем список
+            query = "UPDATE user_lists SET list_name = ? WHERE user_id = ? AND id = ?"
+            if not self.execute_query(query, (updated_list, user_id, id_list)):
+                return False
             
-        return True
+            # Если список пустой, удаляем его
+            if not updated_list:
+                return self.delete_user_list(user_id, id_list)
+                
+            return True
+        except Exception as e:
+            print(f"Ошибка при редактировании списка пользователей: {e}")
+            return False
 
     def delete_user_list(self, user_id, id_list):
         """Удаляет список пользователей"""
-        delete_query = "DELETE FROM user_lists WHERE user_id = ? AND id = ?"
-        if self.execute_query(delete_query, (user_id, id_list)):
-            # Переупорядочить ID
-            self._reorder_user_lists(user_id)
-            return True
-        return False
+        try:
+            # Проверяем существование списка перед удалением
+            check_query = "SELECT COUNT(*) FROM user_lists WHERE user_id = ? AND id = ?"
+            if not self.execute_query(check_query, (user_id, id_list), fetch_one=True)[0]:
+                return False
+
+            delete_query = "DELETE FROM user_lists WHERE user_id = ? AND id = ?"
+            return self.execute_query(delete_query, (user_id, id_list))
+        except Exception as e:
+            print(f"Ошибка при удалении списка пользователей: {e}")
+            return False
+
+    def get_users_for_sending(self, list_id, user_id):
+        """Получает список пользователей для рассылки с проверкой корректности"""
+        try:
+            # Получаем список и проверяем права доступа
+            query = """
+                SELECT ul.list_name
+                FROM user_lists ul
+                WHERE ul.id = ? AND ul.user_id = ?
+            """
+            result = self.execute_query(query, (list_id, user_id), fetch_one=True)
+            
+            if not result:
+                return None
+                
+            list_name = result[0]
+            if not list_name:
+                return []
+                
+            # Получаем пользователей из списка
+            try:
+                user_ids = list(map(int, list_name.split(',')))
+            except ValueError:
+                print("Некорректный формат списка ID пользователей")
+                return []
+
+            if not user_ids:
+                return []
+                
+            # Проверяем существование всех пользователей
+            placeholders = ','.join('?' for _ in user_ids)
+            query = f"""
+                SELECT u.user_id, u.full_name, u.username
+                FROM users u
+                WHERE u.user_id IN ({placeholders})
+            """
+            return self.execute_query(query, user_ids, fetch_all=True) or []
+        except Exception as e:
+            print(f"Ошибка при получении списка пользователей для рассылки: {e}")
+            return None
 
     # Методы для работы с пользователями
     def insert_new_user(self, user_id, username, full_name):
         """Добавляет нового пользователя"""
-        query = "INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)"
-        return self.execute_query(query, (user_id, username, full_name))
+        try:
+            # Проверяем, не существует ли уже пользователь с таким ID
+            check_query = "SELECT COUNT(*) FROM users WHERE user_id = ?"
+            if self.execute_query(check_query, (user_id,), fetch_one=True)[0] > 0:
+                return False
+
+            # Проверяем, не существует ли уже пользователь с таким username
+            check_query = "SELECT COUNT(*) FROM users WHERE username = ?"
+            if self.execute_query(check_query, (username,), fetch_one=True)[0] > 0:
+                return False
+
+            # Проверяем, не существует ли уже пользователь с таким full_name
+            check_query = "SELECT COUNT(*) FROM users WHERE full_name = ?"
+            if self.execute_query(check_query, (full_name,), fetch_one=True)[0] > 0:
+                return False
+
+            # Вставляем нового пользователя
+            query = "INSERT INTO users (user_id, username, full_name) VALUES (?, ?, ?)"
+            return self.execute_query(query, (user_id, username, full_name))
+        except Exception as e:
+            print(f"Ошибка при добавлении пользователя: {e}")
+            return False
 
     def get_users(self, data, colum="user_id"):
         """Получает пользователей по указанным ID или другим параметрам"""
-        if not data:
+        try:
+            if not data:
+                return []
+
+            # Проверяем корректность параметра colum
+            valid_columns = ["user_id", "username", "full_name"]
+            if colum not in valid_columns:
+                print(f"Некорректный параметр colum: {colum}")
+                return []
+
+            if isinstance(data, list):
+                # Проверяем, что все элементы списка имеют правильный тип
+                if colum == "user_id":
+                    try:
+                        data = [int(x) for x in data]
+                    except ValueError:
+                        print("Некорректный формат ID пользователей")
+                        return []
+                placeholders = ",".join("?" for _ in data)
+                query = f"SELECT * FROM users WHERE {colum} IN ({placeholders})"
+            else:
+                if colum == "user_id":
+                    try:
+                        data = int(data)
+                    except ValueError:
+                        print("Некорректный формат ID пользователя")
+                        return []
+                query = f"SELECT * FROM users WHERE {colum} = ?"
+                data = [data]
+
+            return self.execute_query(query, data, fetch_all=True) or []
+        except Exception as e:
+            print(f"Ошибка при получении пользователей: {e}")
             return []
-            
-        if isinstance(data, list):
-            placeholders = ",".join("?" for _ in data)
-            query = f"SELECT * FROM users WHERE {colum} IN ({placeholders})"
-        else:
-            query = f"SELECT * FROM users WHERE {colum} = ?"
-            data = [data]  # Преобразуем одиночное значение в список для единообразия
-            
-        return self.execute_query(query, data, fetch_all=True) or []
 
-    def delete_user(self, username):    
+    def delete_user(self, username):
         """Удаляет пользователя и его ID из всех списков"""
-        # Получаем user_id по username
-        query = "SELECT user_id FROM users WHERE full_name = ?"
-        result = self.execute_query(query, (username,), fetch_all=True)
+        try:
+            # Получаем user_id по username
+            query = "SELECT user_id FROM users WHERE full_name = ?"
+            result = self.execute_query(query, (username,), fetch_one=True)
 
-        if not result:
+            if not result:
+                return False
+            user_id = result[0]
+
+            # Получаем все списки пользователей
+            query = "SELECT id, list_name FROM user_lists"
+            lists = self.execute_query(query, fetch_all=True)
+            
+            # Обновляем каждый список, удаляя user_id
+            for list_id, list_name in lists:
+                if list_name:
+                    try:
+                        # Разбиваем список на отдельные ID
+                        user_ids = list(map(int, list_name.split(',')))
+                        # Удаляем user_id из списка
+                        if user_id in user_ids:
+                            user_ids.remove(user_id)
+                            # Собираем список обратно
+                            new_users_list = ','.join(map(str, user_ids))
+                            # Обновляем список в базе данных
+                            update_query = "UPDATE user_lists SET list_name = ? WHERE id = ?"
+                            if not self.execute_query(update_query, (new_users_list, list_id)):
+                                return False
+                    except ValueError:
+                        print(f"Ошибка при обработке списка пользователей: {list_name}")
+                        continue
+
+            # Удаляем пользователя из таблицы users
+            query = "DELETE FROM users WHERE full_name = ?"
+            return self.execute_query(query, (username,))
+        except Exception as e:
+            print(f"Ошибка при удалении пользователя: {e}")
             return False
-        user_id = result[0][0]
-        
-        # Получаем все списки пользователей
-        query = "SELECT id, list_name FROM user_lists"
-        lists = self.execute_query(query, fetch_all=True)
-        # Обновляем каждый список, удаляя user_id
-        for list_id, list_name in lists:
-            if list_name:
-                # Разбиваем список на отдельные ID
-                user_ids = list_name.split(',')
-                # Удаляем user_id из списка
-                if str(user_id) in user_ids:
-                    user_ids.remove(str(user_id))
-                    # Собираем список обратно
-                    new_users_list = ','.join(user_ids)
-                    # Обновляем список в базе данных
-                    update_query = "UPDATE user_lists SET list_name = ? WHERE id = ?"
-                    self.execute_query(update_query, (new_users_list, list_id))
-        
-        # Удаляем пользователя из таблицы users
-        query = "DELETE FROM users WHERE full_name = ?"
-        return self.execute_query(query, (username,), fetch_one=True)

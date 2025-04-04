@@ -882,15 +882,24 @@ async def message_yes_no_handler(message: Message, state: FSMContext):
         message_to_send = user_data['message_send']
         original_message = user_data.get('original_message')
 
-        # Получаем список пользователей из второго элемента кортежа
-        users = list_users[1]
+        # Получаем список пользователей с проверкой
+        db = DataBase(db_name)
+        users = db.get_users_for_sending(list_users[0], message.from_user.id)
+        
+        if users is None:
+            await message.answer("Ошибка: список не найден или у вас нет прав доступа.")
+            return
+            
+        if not users:
+            await message.answer("Список пользователей пуст.")
+            return
+
+        # Отправляем сообщение каждому пользователю
         for user in users:
             chat_id = user[0]
             user_name = user[1]
-            status = await get_status(state, message, user_id=chat_id, first_start=True)
             try:
                 if original_message and original_message.entities:
-                    # Если есть оригинальное сообщение с форматированием, используем его
                     await bot.send_message(
                         chat_id=chat_id,
                         text=message_to_send,
@@ -898,18 +907,17 @@ async def message_yes_no_handler(message: Message, state: FSMContext):
                         parse_mode=None
                     )
                 else:
-                    # Если форматирования нет, отправляем обычный текст
                     await bot.send_message(
                         chat_id=chat_id,
                         text=message_to_send,
                         parse_mode='HTML'
                     )
             except Exception as e:
-                    error_message = f"Произошла ошибка при отправке сообщения: {e}"
-                    try:
-                        await message.answer(f"Ошибка при отправке сообщения об ошибке пользователю {user_name}: {e}")
-                    except Exception:
-                        print(f"Ошибка при отправке сообщения об ошибке пользователю {user_name}: {e}")
+                error_message = f"Ошибка при отправке сообщения пользователю {user_name}: {e}"
+                try:
+                    await message.answer(error_message)
+                except Exception:
+                    print(error_message)
 
         await message.answer(MESSAGES['OPERATION_COMPLETED'], reply_markup=get_main_keyboard())
         await cmd_cancel(message, state, True)
